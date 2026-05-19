@@ -308,10 +308,48 @@ def publish(db_path, run):
     print(f"[published {db_key} + latest.json to {repo} release `latest`]")
 
 
+def _preflight():
+    """Cheap checks BEFORE the ~272 MB ECMWF download, so bad CMEMS creds
+    / missing OISST fail in seconds instead of after a full pull."""
+    if not SKIP_CMEMS:
+        import copernicusmarine
+        copernicusmarine.open_dataset(
+            dataset_id="cmems_mod_glo_wav_anfc_0.083deg_PT3H-i",
+            variables=["VHM0_SW1"],
+            minimum_longitude=LON_MIN, maximum_longitude=LON_MIN + 0.5,
+            minimum_latitude=LAT_MIN, maximum_latitude=LAT_MIN + 0.5,
+            username=os.environ["COPERNICUSMARINE_SERVICE_USERNAME"],
+            password=os.environ["COPERNICUSMARINE_SERVICE_PASSWORD"])
+        print("[preflight] CMEMS auth OK")
+    if not SKIP_OISST:
+        import urllib.request
+        base = ("https://noaa-cdr-sea-surface-temp-optimum-interpolation-"
+                "pds.s3.amazonaws.com/data/v2.1/avhrr")
+        ok = False
+        for back in range(1, 8):
+            d = dt.date.today() - dt.timedelta(days=back)
+            for suf in ("_preliminary", ""):
+                u = (f"{base}/{d:%Y%m}/oisst-avhrr-v02r01."
+                     f"{d:%Y%m%d}{suf}.nc")
+                try:
+                    rq = urllib.request.Request(u, method="HEAD")
+                    with urllib.request.urlopen(rq, timeout=20):
+                        ok = True
+                        break
+                except Exception:                     # noqa: BLE001
+                    continue
+            if ok:
+                break
+        if not ok:
+            raise RuntimeError("[preflight] no recent OISST file")
+        print("[preflight] OISST reachable")
+
+
 def main():
     os.makedirs(OUT_DIR, exist_ok=True)
     work = os.path.join(OUT_DIR, "work")
     os.makedirs(work, exist_ok=True)
+    _preflight()
     run, atmos, wave = fetch_ecmwf(work)
     db_path = os.path.join(OUT_DIR, f"ecmwf_{run:%Y%m%d%H}.db")
     run, steps, nrows = build_db(run, atmos, wave, db_path)
