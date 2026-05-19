@@ -40,6 +40,16 @@ SKIP_CMEMS = os.environ.get("INGEST_SKIP_CMEMS", "") == "1"
 SKIP_OISST = os.environ.get("INGEST_SKIP_OISST", "") == "1"
 
 
+def _timed(label, fn):
+    """Run fn(), print '[timing] <label> Ns' (flushed) so a stalled phase
+    is identifiable straight from the Action log."""
+    import time
+    s = time.perf_counter()
+    r = fn()
+    print(f"[timing] {label} {time.perf_counter() - s:.1f}s", flush=True)
+    return r
+
+
 def _snap(a):
     """Round a coord array onto the 0.25 grid (guardrail B: exact keys)."""
     return np.round(np.asarray(a, float) / GRID_RES) * GRID_RES
@@ -126,10 +136,11 @@ def build_db(run, atmos, wave, db_path):
     # ECMWF grid so the app deals with ONE grid.
     sw = {}
     if not SKIP_CMEMS:
-        sw = fetch_cmems_on_grid(lats, lons, vt, steps)
+        sw = _timed("cmems", lambda: fetch_cmems_on_grid(
+            lats, lons, vt, steps))
     sst_grid = None
     if not SKIP_OISST:
-        sst_grid = fetch_oisst_on_grid(lats, lons)
+        sst_grid = _timed("oisst", lambda: fetch_oisst_on_grid(lats, lons))
 
     if os.path.exists(db_path):
         os.remove(db_path)
@@ -179,24 +190,52 @@ def build_db(run, atmos, wave, db_path):
 
 def fetch_cmems_on_grid(lats, lons, vt, steps):
     """CMEMS MFWAM SW1 interpolated onto the ECMWF grid, keyed by ECMWF
-    step (each step's valid_time -> nearest CMEMS time)."""
+    step (each step's valid_time -> nearest CMEMS time).
+
+    The bbox+time window is downloaded ONCE to a local NetCDF via
+    `copernicusmarine.subset`, then every step is sampled in-memory. This
+    replaces the previous lazy-remote `open_dataset` + per-step `.sel`,
+    which made one network round-trip per step (57 -> timed out)."""
+    import glob
     import xarray as xr
     import copernicusmarine
-    ds = copernicusmarine.open_dataset(
+    t0 = np.atleast_1d(vt).astype("datetime64[s]")
+    pad = np.timedelta64(3, "h")
+    start = (t0.min() - pad).astype("datetime64[s]").astype(object)
+    end = (t0.max() + pad).astype("datetime64[s]").astype(object)
+    ncf = os.path.join(OUT_DIR, "cmems_sw1.nc")
+    if os.path.exists(ncf):
+        os.remove(ncf)
+    kw = dict(
         dataset_id="cmems_mod_glo_wav_anfc_0.083deg_PT3H-i",
         variables=["VHM0_SW1", "VTM01_SW1", "VMDR_SW1"],
         minimum_longitude=LON_MIN, maximum_longitude=LON_MAX,
         minimum_latitude=LAT_MIN, maximum_latitude=LAT_MAX,
+        start_datetime=start, end_datetime=end,
+        output_directory=OUT_DIR, output_filename=os.path.basename(ncf),
         username=os.environ["COPERNICUSMARINE_SERVICE_USERNAME"],
         password=os.environ["COPERNICUSMARINE_SERVICE_PASSWORD"])
+    try:                                  # kwarg name varies across versions
+        copernicusmarine.subset(overwrite=True, **kw)
+    except TypeError:
+        copernicusmarine.subset(**kw)
+    if not os.path.exists(ncf):           # some versions rename the output
+        cands = sorted(glob.glob(os.path.join(OUT_DIR, "cmems*.nc")),
+                       key=os.path.getmtime)
+        if not cands:
+            raise RuntimeError("CMEMS subset produced no NetCDF")
+        ncf = cands[-1]
+    ds = xr.open_dataset(ncf).load()      # fully in-memory -> fast .sel
+    yy = xr.DataArray(lats, dims="y")
+    xx = xr.DataArray(lons, dims="x")
     out = {}
-    for t, st in zip(vt, steps):
+    for t, st in zip(t0, steps):
         snap = ds.sel(time=np.datetime64(t), method="nearest").sel(
-            latitude=xr.DataArray(lats, dims="y"),
-            longitude=xr.DataArray(lons, dims="x"), method="nearest")
+            latitude=yy, longitude=xx, method="nearest")
         out[int(st)] = {"h": snap["VHM0_SW1"].values,
                         "t": snap["VTM01_SW1"].values,
                         "d": snap["VMDR_SW1"].values}
+    ds.close()
     return out
 
 
@@ -349,16 +388,17 @@ def main():
     os.makedirs(OUT_DIR, exist_ok=True)
     work = os.path.join(OUT_DIR, "work")
     os.makedirs(work, exist_ok=True)
-    _preflight()
-    run, atmos, wave = fetch_ecmwf(work)
+    _timed("preflight", _preflight)
+    run, atmos, wave = _timed("ecmwf", lambda: fetch_ecmwf(work))
     db_path = os.path.join(OUT_DIR, f"ecmwf_{run:%Y%m%d%H}.db")
-    run, steps, nrows = build_db(run, atmos, wave, db_path)
+    run, steps, nrows = _timed(
+        "build_db", lambda: build_db(run, atmos, wave, db_path))
     sidecars = [p for p in (db_path + "-wal", db_path + "-shm")
                 if os.path.exists(p)]
     print(f"cycle={run:%Y-%m-%dT%H}Z steps={len(steps)} rows={nrows} "
           f"size={os.path.getsize(db_path)/1e6:.1f}MB "
           f"sidecars={sidecars or 'none (OK)'}")
-    publish(db_path, run)
+    _timed("publish", lambda: publish(db_path, run))
 
 
 if __name__ == "__main__":
