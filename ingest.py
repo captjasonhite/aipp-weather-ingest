@@ -1,13 +1,3 @@
-"""Option C ingest — runs in the PUBLIC aipp-weather-ingest repo's Action.
-
-Pulls one ECMWF IFS 0.25 Open Data cycle (+ CMEMS swell partition + NOAA
-OISST), crops to the operating bbox, flattens to a single self-contained
-SQLite file, and atomically publishes it as GitHub Release assets (tag
-`latest`) with a manifest. No object store / credit card.
-
-The Render app never runs this; it only reads the published .db + manifest
-from .../releases/download/latest/.
-
 Env:
   GITHUB_TOKEN, GITHUB_REPOSITORY   -> publish to Releases (auto in Actions;
                                        skipped if unset -> local artifact)
