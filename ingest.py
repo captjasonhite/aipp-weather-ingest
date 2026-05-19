@@ -1,3 +1,13 @@
+"""Option C ingest — runs in the PUBLIC aipp-weather-ingest repo's Action.
+
+Pulls one ECMWF IFS 0.25 Open Data cycle (+ CMEMS swell partition + NOAA
+OISST), crops to the operating bbox, flattens to a single self-contained
+SQLite file, and atomically publishes it as GitHub Release assets (tag
+`latest`) with a manifest. No object store / credit card.
+
+The Render app never runs this; it only reads the published .db + manifest
+from .../releases/download/latest/.
+
 Env:
   GITHUB_TOKEN, GITHUB_REPOSITORY   -> publish to Releases (auto in Actions;
                                        skipped if unset -> local artifact)
@@ -181,9 +191,9 @@ def fetch_cmems_on_grid(lats, lons, vt, steps):
         password=os.environ["COPERNICUSMARINE_SERVICE_PASSWORD"])
     out = {}
     for t, st in zip(vt, steps):
-        snap = ds.sel(time=np.datetime64(t), method="nearest").interp(
+        snap = ds.sel(time=np.datetime64(t), method="nearest").sel(
             latitude=xr.DataArray(lats, dims="y"),
-            longitude=xr.DataArray(lons, dims="x"))
+            longitude=xr.DataArray(lons, dims="x"), method="nearest")
         out[int(st)] = {"h": snap["VHM0_SW1"].values,
                         "t": snap["VTM01_SW1"].values,
                         "d": snap["VMDR_SW1"].values}
@@ -210,9 +220,10 @@ def fetch_oisst_on_grid(lats, lons):
                     s = s.isel(zlev=0)
                 s = s.assign_coords(
                     lon=(((s["lon"] + 180) % 360) - 180)).sortby("lon")
-                return s.interp(
+                return s.sel(
                     lat=xr.DataArray(lats, dims="y"),
-                    lon=xr.DataArray(lons, dims="x")).values
+                    lon=xr.DataArray(lons, dims="x"),
+                    method="nearest").values
             except Exception:                         # noqa: BLE001
                 continue
     raise RuntimeError("OISST: no recent file found")
