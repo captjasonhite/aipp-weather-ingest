@@ -2,13 +2,15 @@
 
 Pulls one ECMWF IFS 0.25 Open Data cycle (+ CMEMS swell partition + NOAA
 OISST), crops to the operating bbox, flattens to a single self-contained
-SQLite file, and atomically publishes it to Cloudflare R2 with a manifest.
+SQLite file, and atomically publishes it as GitHub Release assets (tag
+`latest`) with a manifest. No object store / credit card.
 
-The Render app never runs this; it only reads the published .db + manifest.
+The Render app never runs this; it only reads the published .db + manifest
+from .../releases/download/latest/.
 
 Env:
-  R2_ENDPOINT, R2_BUCKET, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY
-                                          -> publish to R2 (skipped if unset)
+  GITHUB_TOKEN, GITHUB_REPOSITORY   -> publish to Releases (auto in Actions;
+                                       skipped if unset -> local artifact)
   COPERNICUSMARINE_SERVICE_USERNAME/PASSWORD   -> CMEMS auth
   INGEST_STEPS=0,24,48      -> override step list (local fast test)
   INGEST_SKIP_CMEMS=1 / INGEST_SKIP_OISST=1    -> local test without those
@@ -226,39 +228,83 @@ def fetch_oisst_on_grid(lats, lons):
     raise RuntimeError("OISST: no recent file found")
 
 
+_GH = "https://api.github.com"
+_UP = "https://uploads.github.com"
+
+
+def _gh(method, url, token, data=None, ctype="application/json"):
+    import urllib.request
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Authorization", f"Bearer {token}")
+    req.add_header("Accept", "application/vnd.github+json")
+    req.add_header("X-GitHub-Api-Version", "2022-11-28")
+    if data is not None:
+        req.add_header("Content-Type", ctype)
+    with urllib.request.urlopen(req, timeout=120) as r:
+        body = r.read()
+    return json.loads(body) if body and ctype != "application/octet-stream" \
+        and url.startswith(_GH) else body
+
+
 def publish(db_path, run):
-    """Atomic publish: upload .db to completion, THEN flip latest.json."""
+    """Atomic publish to GitHub Releases (tag `latest`): upload the .db
+    asset to completion, THEN replace latest.json (the pointer flip).
+    App reads .../releases/download/latest/<name>."""
     sha = hashlib.sha256(open(db_path, "rb").read()).hexdigest()
     size = os.path.getsize(db_path)
+    db_key = f"ecmwf_{run:%Y%m%d%H}.db"
     manifest = {
         "cycle_utc": run.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "db_key": f"ecmwf_{run:%Y%m%d%H}.db", "bytes": size, "sha256": sha,
+        "db_key": db_key, "bytes": size, "sha256": sha,
         "created_utc": dt.datetime.now(dt.timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%SZ")}
     with open(os.path.join(OUT_DIR, "latest.json"), "w") as fh:
         json.dump(manifest, fh)
-    ep = os.environ.get("R2_ENDPOINT")
-    if not ep:
-        print(f"[no R2_* env — wrote {OUT_DIR}/latest.json, upload skipped]")
+
+    token = os.environ.get("GITHUB_TOKEN")
+    repo = os.environ.get("GITHUB_REPOSITORY")        # "owner/name"
+    if not (token and repo):
+        print(f"[no GITHUB_TOKEN/REPOSITORY — wrote {OUT_DIR}/latest.json, "
+              f"upload skipped]")
         return
-    import boto3
-    s3 = boto3.client(
-        "s3", endpoint_url=ep,
-        aws_access_key_id=os.environ["R2_ACCESS_KEY_ID"],
-        aws_secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"])
-    bucket = os.environ["R2_BUCKET"]
-    key = manifest["db_key"]
-    s3.upload_file(db_path, bucket, key)              # 1. data first
-    s3.put_object(Bucket=bucket, Key="latest.json",
-                  Body=json.dumps(manifest).encode(),
-                  ContentType="application/json")     # 2. flip pointer
-    # keep current + previous cycle only
-    objs = s3.list_objects_v2(Bucket=bucket).get("Contents", [])
-    dbs = sorted((o["Key"] for o in objs if o["Key"].endswith(".db")),
-                 reverse=True)
-    for old in dbs[2:]:
-        s3.delete_object(Bucket=bucket, Key=old)
-    print(f"[published {key} + latest.json]")
+    import urllib.error
+
+    # ensure release with tag `latest`
+    try:
+        rel = _gh("GET", f"{_GH}/repos/{repo}/releases/tags/latest", token)
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            raise
+        rel = _gh("POST", f"{_GH}/repos/{repo}/releases", token,
+                  json.dumps({"tag_name": "latest", "name": "latest",
+                              "body": "Option C weather data plane — "
+                              "auto-published; do not edit."}).encode())
+    rid = rel["id"]
+    assets = {a["name"]: a["id"] for a in rel.get("assets", [])}
+
+    def put_asset(name, blob, ctype):
+        if name in assets:                            # assets are immutable
+            _gh("DELETE",
+                f"{_GH}/repos/{repo}/releases/assets/{assets[name]}", token)
+        _gh("POST",
+            f"{_UP}/repos/{repo}/releases/{rid}/assets?name={name}",
+            token, blob, ctype)
+
+    # 1. data first (new cycle name → additive, old db still referenced)
+    with open(db_path, "rb") as fh:
+        put_asset(db_key, fh.read(), "application/octet-stream")
+    # 2. flip the pointer
+    put_asset("latest.json", json.dumps(manifest).encode(),
+              "application/json")
+    # retention: keep newest 2 cycle DBs
+    rel = _gh("GET", f"{_GH}/repos/{repo}/releases/tags/latest", token)
+    dbs = sorted((a for a in rel.get("assets", [])
+                  if a["name"].endswith(".db")),
+                 key=lambda a: a["name"], reverse=True)
+    for a in dbs[2:]:
+        _gh("DELETE",
+            f"{_GH}/repos/{repo}/releases/assets/{a['id']}", token)
+    print(f"[published {db_key} + latest.json to {repo} release `latest`]")
 
 
 def main():
