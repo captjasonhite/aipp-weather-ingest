@@ -1,0 +1,5 @@
+_out/
+work/
+*.db
+*.nc
+*.grib2
