@@ -133,6 +133,7 @@ def _traffic_light(worst):
 
 _BAJA_STATIONS = [
     ("Cabo Falso",  22.75, -110.5,  True),
+    ("Punta Tosca", 23.6,  -110.7, False),
     ("Santa Maria",  24.7,  -112.4, False),
     ("Turtle Bay",   27.8,  -115.3, False),
     ("Ensenada",     31.7,  -116.8, False),
