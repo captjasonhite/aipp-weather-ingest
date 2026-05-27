@@ -1,0 +1,49 @@
+name: baja-history
+
+on:
+  schedule:
+    - cron: "0 15 * * 1"      # Mondays 15:00 UTC — matches prior pg_cron slot
+  workflow_dispatch:
+    inputs:
+      year:
+        description: "Backfill this year (full fetch). Leave blank for incremental update of current year."
+        required: false
+        type: string
+  repository_dispatch:
+    types: [baja-history]
+
+concurrency:
+  group: baja-history
+  cancel-in-progress: false
+
+permissions:
+  contents: write              # publish processed_*.json as Release assets
+
+jobs:
+  baja-history:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180       # CDS queue can be slow; well under GH's 6h max
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Python deps
+        run: pip install cdsapi xarray netCDF4
+      - name: Write ~/.cdsapirc
+        env:
+          CDSAPI_URL: ${{ secrets.CDSAPI_URL }}
+          CDSAPI_KEY: ${{ secrets.CDSAPI_KEY }}
+        run: |
+          umask 077
+          printf 'url: %s\nkey: %s\n' "$CDSAPI_URL" "$CDSAPI_KEY" > "$HOME/.cdsapirc"
+      - name: Run baja-history fetch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # GITHUB_REPOSITORY is set automatically by the runner.
+        run: |
+          if [ -n "${{ inputs.year }}" ]; then
+            python baja_history_fetch.py --year "${{ inputs.year }}"
+          else
+            python baja_history_fetch.py
+          fi
