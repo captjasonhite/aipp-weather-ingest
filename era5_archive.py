@@ -119,7 +119,8 @@ def _retrieve_month(cdsapi, dataset, lat, lon, year, month,
 
 def fetch_era5_hourly_point(lat: float, lon: float, year: int,
                             variables: list[str], *,
-                            dataset: str = "reanalysis-era5-single-levels"
+                            dataset: str = "reanalysis-era5-single-levels",
+                            months=None
                             ) -> dict:
     """Return ``{"time": [iso hourly], **{nc_var: [hourly values]}}`` for
     `year` at the ERA5 grid cell nearest (lat, lon).
@@ -129,8 +130,11 @@ def fetch_era5_hourly_point(lat: float, lon: float, year: int,
     (e.g. 'u10') from `_NC_NAME`. Empty dict on any failure (missing
     deps, CDS error, file invalid) — caller's try/except handles.
 
-    Fetched in monthly chunks (12 small CDS jobs per year). Partial-year
-    coverage is returned if some months fail."""
+    Fetched in monthly chunks (one small CDS job per month). By default
+    fetches all 12 months of `year`; pass `months=[4,5]` to only request
+    a specific subset — critical for weekly incrementals so we don't
+    re-queue 10 months we'll throw away (CDS will throttle you for that).
+    Partial coverage is returned if some months fail."""
     try:
         import cdsapi
         import xarray as xr
@@ -140,7 +144,10 @@ def fetch_era5_hourly_point(lat: float, lon: float, year: int,
     times: list[str] = []
     series: dict[str, list] = {}
 
-    for month in range(1, 13):
+    if months is None:
+        months = range(1, 13)
+
+    for month in months:
         path = _cache_path(lat, lon, year, month,
                            tuple(variables), dataset)
         if not os.path.exists(path):

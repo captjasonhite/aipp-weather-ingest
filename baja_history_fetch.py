@@ -139,6 +139,13 @@ def _utc_to_la(t_iso: str) -> str:
         "%Y-%m-%dT%H:00")
 
 
+def _months_in_year(s, e, year):
+    """Months of `year` that overlap the [s, e] date range (inclusive)."""
+    lo = s.month if s.year == year else 1
+    hi = e.month if e.year == year else 12
+    return list(range(lo, hi + 1))
+
+
 def _era5_wind_range(lat, lon, start_date, end_date):
     import math
     s = datetime.date.fromisoformat(start_date)
@@ -148,7 +155,8 @@ def _era5_wind_range(lat, lon, start_date, end_date):
         data = era5_archive.fetch_era5_hourly_point(
             lat, lon, year,
             ["10m_u_component_of_wind", "10m_v_component_of_wind",
-             "10m_wind_gust_since_previous_post_processing"])
+             "10m_wind_gust_since_previous_post_processing"],
+            months=_months_in_year(s, e, year))
         if not data.get("time"):
             continue
         us = data.get("u10", [])
@@ -183,7 +191,8 @@ def _era5_marine_range(lat, lon, start_date, end_date):
         data = era5_archive.fetch_era5_hourly_point(
             lat, lon, year,
             ["significant_height_of_combined_wind_waves_and_swell",
-             "mean_wave_period", "mean_wave_direction"])
+             "mean_wave_period", "mean_wave_direction"],
+            months=_months_in_year(s, e, year))
         if not data.get("time"):
             continue
         hs = data.get("swh", [])
@@ -301,7 +310,13 @@ def _end_date_for(year):
 
 def _process_range(year, start, end):
     """Fetch + process [start, end] for one year. Returns combined dict."""
-    print(f"\n── Baja Bash {year}  {start} → {end} ──", flush=True)
+    sd = datetime.date.fromisoformat(start)
+    ed = datetime.date.fromisoformat(end)
+    months = _months_in_year(sd, ed, year)
+    n_jobs = len(STATIONS) * 2 * len(months)              # 2 datasets per station
+    print(f"\n── Baja Bash {year}  {start} → {end} "
+          f"({len(months)} months × {len(STATIONS)} stations × 2 datasets "
+          f"= {n_jobs} CDS jobs) ──", flush=True)
     by_station = {}
     for s in STATIONS:
         print(f"  {s['name']} …", flush=True)
