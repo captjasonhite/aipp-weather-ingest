@@ -50,8 +50,14 @@ MSLP_LON_MIN, MSLP_LON_MAX = -180.0, -90.0   # to -90: covers H/L domain (-95) +
 MSLP_RES = 0.5
 MSLP_STEP_EVERY = 6                      # 6-hourly (pressure evolves slowly)
 
-# ECMWF IFS 0.25 oper steps: 3-hourly to 144h, then 6-hourly to 168h.
-_FULL_STEPS = list(range(0, 145, 3)) + [150, 156, 162, 168]
+# ECMWF IFS 0.25 oper steps: 3-hourly to 144h, then 6-hourly to 192h.
+# 192h covers a full 7th LOCAL forecast day even in the worst case
+# (UTC-8 viewing a 12z cycle the next morning needs ~187h); the upstream
+# 00/12z oper stream publishes to 240h, so these are always available on
+# the scheduled 07/19 UTC runs. Only ingest at 00/12z — 06/18z runs cap
+# at 90h, so a dispatch landing on one fails the retrieve and the last
+# good release is kept.
+_FULL_STEPS = list(range(0, 145, 3)) + [150, 156, 162, 168, 174, 180, 186, 192]
 STEPS = ([int(s) for s in os.environ["INGEST_STEPS"].split(",")]
          if os.environ.get("INGEST_STEPS") else _FULL_STEPS)
 
