@@ -41,6 +41,17 @@ WAV_BOXES = [
     (17.25, 19.25,  -65.75,  -63.75),    # E. Caribbean (BVI / USVI)
 ]
 
+# Surface currents (SMOC): CMEMS merged u/v (circulation + tide + Stokes),
+# hourly, native ~0.083, same boxes as the wave overlay. Stored as one
+# int16 mm/s blob per (box, step, var) — hourly x 20k nodes would be ~1M
+# rows in the wav row layout vs ~10 MB of blobs. Fill value = CUR_FILL
+# (land / no data). Vetted against captain reports 2026-07-12
+# (data/currents_validation/): set + timing good, magnitude conservative.
+CUR_BOXES = WAV_BOXES
+CUR_MAX_STEP = 120                       # 5-day hourly currents horizon
+CUR_DSID = "cmems_mod_glo_phy_anfc_merged-uv_PT1H-i"
+CUR_FILL = -32768
+
 # MSLP (Phase 2b): synoptic mean-sea-level pressure for H/L pressure
 # centers + the NPH 35N transect (lon to -160, OUTSIDE the wave bbox).
 # ECMWF Open Data `msl` is global 0.25 @ ~0.5 MB/step; we crop to the
@@ -50,14 +61,8 @@ MSLP_LON_MIN, MSLP_LON_MAX = -180.0, -90.0   # to -90: covers H/L domain (-95) +
 MSLP_RES = 0.5
 MSLP_STEP_EVERY = 6                      # 6-hourly (pressure evolves slowly)
 
-# ECMWF IFS 0.25 oper steps: 3-hourly to 144h, then 6-hourly to 192h.
-# 192h covers a full 7th LOCAL forecast day even in the worst case
-# (UTC-8 viewing a 12z cycle the next morning needs ~187h); the upstream
-# 00/12z oper stream publishes to 240h, so these are always available on
-# the scheduled 07/19 UTC runs. Only ingest at 00/12z — 06/18z runs cap
-# at 90h, so a dispatch landing on one fails the retrieve and the last
-# good release is kept.
-_FULL_STEPS = list(range(0, 145, 3)) + [150, 156, 162, 168, 174, 180, 186, 192]
+# ECMWF IFS 0.25 oper steps: 3-hourly to 144h, then 6-hourly to 168h.
+_FULL_STEPS = list(range(0, 145, 3)) + [150, 156, 162, 168]
 STEPS = ([int(s) for s in os.environ["INGEST_STEPS"].split(",")]
          if os.environ.get("INGEST_STEPS") else _FULL_STEPS)
 
@@ -263,6 +268,10 @@ def build_db(run, atmos, db_path):
     V, FG = _bystep(v10_vt, v10), _bystep(fg_vt, fg10)
     T2 = _bystep(t2_vt, t2m)             # 2 m temp (NPH thermal-low contrast)
     steps = sorted(s for s in U if s >= 0)   # driver=10u; drop pre-base hrs
+    _miss = sorted(set(steps) - set(FG))
+    print(f"[ecmwf] gust(10fg) coverage: {len(FG)}/{len(steps)} steps; "
+          f"missing={_miss[:16]}{'...' if len(_miss) > 16 else ''}",
+          flush=True)
     vt = u10_vt                  # CMEMS nearest-time aligns to driver steps
 
     # Waves (total swh/mwp/mwd) + swell partition (sw1_*) both from CMEMS
@@ -297,7 +306,11 @@ def build_db(run, atmos, db_path):
         "CREATE TABLE mslp_meta(res REAL, lat_min REAL, lat_max REAL,"
         " lon_min REAL, lon_max REAL, steps_json TEXT);"
         "CREATE TABLE mslp(lat REAL, lon REAL, step INT, pa REAL,"
-        " PRIMARY KEY(lat,lon,step));")
+        " PRIMARY KEY(lat,lon,step));"
+        "CREATE TABLE cur_meta(box INT, lat0 REAL, lon0 REAL, res REAL,"
+        " ny INT, nx INT, steps_json TEXT);"
+        "CREATE TABLE cur(box INT, step INT, u BLOB, v BLOB,"
+        " PRIMARY KEY(box,step));")
     cx.execute(
         "INSERT INTO meta VALUES(?,?,?,?,?,?,?,?)",
         (run.strftime("%Y-%m-%dT%H:%M:%SZ"), GRID_RES, LAT_MIN, LAT_MAX,
@@ -332,6 +345,8 @@ def build_db(run, atmos, db_path):
     nwav = 0
     if cmems_ncf:
         nwav = _timed("wav", lambda: build_wav(cx, cmems_ncf, run))
+    if not SKIP_CMEMS:
+        _timed("cur", lambda: build_cur(cx, run))
     nmslp = _timed("mslp", lambda: build_mslp(cx, atmos, run))
     cx.commit()
     cx.execute("VACUUM")            # guardrail A: single static .db, no -wal
@@ -450,6 +465,78 @@ def build_wav(cx, ncf, run):
                (WAV_RES, WAV_MAX_STEP, json.dumps(WAV_BOXES),
                 json.dumps(wav_steps)))
     return len(rows)
+
+
+def build_cur(cx, run):
+    """SMOC surface currents (utotal/vtotal = circulation + tide + Stokes)
+    per CUR_BOX, hourly to CUR_MAX_STEP, as int16 mm/s blobs keyed
+    (box, step). One `copernicusmarine.subset` download per box; NaN
+    (land) -> CUR_FILL. Coords snapped like the wav lattice; cur_meta
+    stores the blob geometry so the reader can index without the grid."""
+    import glob
+    import xarray as xr
+    import copernicusmarine
+    base = run.replace(tzinfo=None)
+    max_st = min(CUR_MAX_STEP, max(STEPS))
+    steps = list(range(0, max_st + 1))
+    nrows = 0
+    for bi, (la_min, la_max, lo_min, lo_max) in enumerate(CUR_BOXES):
+        ncf = os.path.join(OUT_DIR, f"cmems_cur{bi}.nc")
+        if os.path.exists(ncf):
+            os.remove(ncf)
+        kw = dict(
+            dataset_id=CUR_DSID, variables=["utotal", "vtotal"],
+            minimum_longitude=lo_min, maximum_longitude=lo_max,
+            minimum_latitude=la_min, maximum_latitude=la_max,
+            # tz-AWARE datetimes: copernicusmarine treats naive input as
+            # LOCAL time and silently shifts the window (caught in local
+            # testing, TZ=UTC-5 -> +5 h shift; GHA masks it with TZ=UTC)
+            start_datetime=run, end_datetime=run + dt.timedelta(
+                hours=max_st + 1),
+            output_directory=OUT_DIR, output_filename=os.path.basename(ncf),
+            username=os.environ["COPERNICUSMARINE_SERVICE_USERNAME"],
+            password=os.environ["COPERNICUSMARINE_SERVICE_PASSWORD"])
+        try:                              # kwarg name varies across versions
+            copernicusmarine.subset(overwrite=True, **kw)
+        except TypeError:
+            copernicusmarine.subset(**kw)
+        if not os.path.exists(ncf):       # some versions rename the output
+            cands = sorted(glob.glob(os.path.join(OUT_DIR,
+                                                  f"cmems_cur{bi}*.nc")),
+                           key=os.path.getmtime)
+            if not cands:
+                raise RuntimeError("CMEMS currents subset produced no NetCDF")
+            ncf = cands[-1]
+        ds = xr.open_dataset(ncf).load()
+        for zdim in ("depth", "elevation"):
+            if zdim in ds.dims:
+                ds = ds.isel({zdim: 0})
+        la = _wav_snap(ds["latitude"].values)
+        lo = _wav_snap(ds["longitude"].values)
+        box_steps = []
+        tb = np.datetime64(base, "s")
+        for st in steps:
+            snap = ds.sel(time=tb + np.timedelta64(int(st), "h"),
+                          method="nearest")
+            # nearest-time guard: don't key an hour the subset doesn't cover
+            if abs((snap["time"].values - (tb + np.timedelta64(int(st), "h")))
+                   / np.timedelta64(1, "h")) > 1:
+                continue
+
+            def _blob(var):
+                a = np.atleast_2d(snap[var].values).astype("float64") * 1000.0
+                out = np.where(np.isnan(a), CUR_FILL,
+                               np.clip(np.round(a), -32767, 32767))
+                return out.astype("<i2").tobytes()
+            cx.execute("INSERT OR REPLACE INTO cur VALUES(?,?,?,?)",
+                       (bi, st, _blob("utotal"), _blob("vtotal")))
+            box_steps.append(st)
+            nrows += 1
+        cx.execute("INSERT INTO cur_meta VALUES(?,?,?,?,?,?,?)",
+                   (bi, round(float(la[0]), 4), round(float(lo[0]), 4),
+                    WAV_RES, len(la), len(lo), json.dumps(box_steps)))
+        ds.close()
+    return nrows
 
 
 def build_mslp(cx, atmos, run):
