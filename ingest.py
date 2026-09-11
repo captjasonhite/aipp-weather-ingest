@@ -214,7 +214,7 @@ def _retrieve(target, **kw):
 def fetch_ecmwf(work):
     atmos = _retrieve(os.path.join(work, "atmos.grib2"),
                       type="fc", step=STEPS,
-                      param=["10u", "10v", "10fg", "msl", "2t"])
+                      param=["10u", "10v", "10fg", "msl", "2t", "2d", "tp", "tcc"])
     # Waves now come from CMEMS MFWAM (8 km, better coastal physics) — the
     # coarse 0.25 ECMWF wave stream is no longer pulled (saves ~138 MB/run).
     # Authoritative cycle = the base time of the data we ACTUALLY got, not
@@ -264,9 +264,15 @@ def build_db(run, atmos, db_path):
     _, _, v10_vt, v10 = series(atmos, "10v")
     _, _, fg_vt, fg10 = series(atmos, "10fg")
     _, _, t2_vt, t2m = series(atmos, "2t")
+    _, _, d2_vt, d2m = series(atmos, "2d")
+    _, _, tp_vt, tp = series(atmos, "tp")
+    _, _, tcc_vt, tcc = series(atmos, "tcc")
     U = _bystep(u10_vt, u10)
     V, FG = _bystep(v10_vt, v10), _bystep(fg_vt, fg10)
     T2 = _bystep(t2_vt, t2m)             # 2 m temp (NPH thermal-low contrast)
+    D2 = _bystep(d2_vt, d2m)             # 2 m dewpoint (-> RH for local weather)
+    TP = _bystep(tp_vt, tp)              # total precip, accumulated since t=0
+    TCC = _bystep(tcc_vt, tcc)           # total cloud cover, fraction 0-1
     steps = sorted(s for s in U if s >= 0)   # driver=10u; drop pre-base hrs
     _miss = sorted(set(steps) - set(FG))
     print(f"[ecmwf] gust(10fg) coverage: {len(FG)}/{len(steps)} steps; "
@@ -295,7 +301,8 @@ def build_db(run, atmos, db_path):
         " created_utc TEXT);"
         "CREATE TABLE fc(lat REAL, lon REAL, step INT, u10 REAL, v10 REAL,"
         " fg10 REAL, swh REAL, mwp REAL, mwd REAL, sw1_h REAL, sw1_t REAL,"
-        " sw1_d REAL, t2m REAL, PRIMARY KEY(lat,lon,step));"
+        " sw1_d REAL, t2m REAL, d2m REAL, tp REAL, tcc REAL,"
+        " PRIMARY KEY(lat,lon,step));"
         "CREATE TABLE sst(lat REAL, lon REAL, sst REAL,"
         " PRIMARY KEY(lat,lon));"
         "CREATE TABLE wav_meta(res REAL, max_step INT, boxes_json TEXT,"
@@ -320,6 +327,7 @@ def build_db(run, atmos, db_path):
     rows = []
     for st in steps:
         u, v, fg, t2 = U[st], V.get(st), FG.get(st), T2.get(st)
+        d2, tpv, tccv = D2.get(st), TP.get(st), TCC.get(st)
         sh = sw.get(st) if sw else None       # CMEMS total + SW1 for step
         for iy, la in enumerate(lats):
             for ix, lo in enumerate(lons):
@@ -334,8 +342,11 @@ def build_db(run, atmos, db_path):
                     None if sh is None else float(sh["sw1_h"][iy, ix]),
                     None if sh is None else float(sh["sw1_t"][iy, ix]),
                     None if sh is None else float(sh["sw1_d"][iy, ix]),
-                    None if t2 is None else float(t2[iy, ix])))
-    cx.executemany("INSERT INTO fc VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+                    None if t2 is None else float(t2[iy, ix]),
+                    None if d2 is None else float(d2[iy, ix]),
+                    None if tpv is None else float(tpv[iy, ix]),
+                    None if tccv is None else float(tccv[iy, ix])))
+    cx.executemany("INSERT INTO fc VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
     if sst_grid is not None:
         cx.executemany(
             "INSERT INTO sst VALUES(?,?,?)",
