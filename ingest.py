@@ -214,7 +214,7 @@ def _retrieve(target, **kw):
 def fetch_ecmwf(work):
     atmos = _retrieve(os.path.join(work, "atmos.grib2"),
                       type="fc", step=STEPS,
-                      param=["10u", "10v", "10fg", "msl", "2t", "2d", "tp", "tcc"])
+                      param=["10u", "10v", "10fg", "10fg3", "msl", "2t", "2d", "tp", "tcc"])
     # Waves now come from CMEMS MFWAM (8 km, better coastal physics) — the
     # coarse 0.25 ECMWF wave stream is no longer pulled (saves ~138 MB/run).
     # Authoritative cycle = the base time of the data we ACTUALLY got, not
@@ -263,12 +263,22 @@ def build_db(run, atmos, db_path):
     lats, lons, u10_vt, u10 = series(atmos, "10u")
     _, _, v10_vt, v10 = series(atmos, "10v")
     _, _, fg_vt, fg10 = series(atmos, "10fg")
+    # ECMWF publishes the gust under a different param name for steps 93-144
+    # (10fg3 = max gust in the last 3 h; 10fg covers 0-90 and 150+). Merge the
+    # real values so the mid-range is never left empty.
+    try:
+        _, _, fg3_vt, fg3 = series(atmos, "10fg3")
+    except (IndexError, KeyError, OSError) as e:
+        print(f"[ecmwf] 10fg3 not in this cycle's GRIB: {e}", flush=True)
+        fg3_vt, fg3 = None, None
     _, _, t2_vt, t2m = series(atmos, "2t")
     _, _, d2_vt, d2m = series(atmos, "2d")
     _, _, tp_vt, tp = series(atmos, "tp")
     _, _, tcc_vt, tcc = series(atmos, "tcc")
     U = _bystep(u10_vt, u10)
     V, FG = _bystep(v10_vt, v10), _bystep(fg_vt, fg10)
+    if fg3 is not None:
+        FG.update({s: c for s, c in _bystep(fg3_vt, fg3).items() if s not in FG})
     T2 = _bystep(t2_vt, t2m)             # 2 m temp (NPH thermal-low contrast)
     D2 = _bystep(d2_vt, d2m)             # 2 m dewpoint (-> RH for local weather)
     TP = _bystep(tp_vt, tp)              # total precip, accumulated since t=0
