@@ -57,7 +57,7 @@ CUR_FILL = -32768
 # ECMWF Open Data `msl` is global 0.25 @ ~0.5 MB/step; we crop to the
 # North Pacific and coarsen (pressure is synoptic — 0.5 is plenty).
 MSLP_LAT_MIN, MSLP_LAT_MAX = 0.0, 60.0
-MSLP_LON_MIN, MSLP_LON_MAX = -180.0, -90.0   # to -90: covers H/L domain (-95) +margin
+MSLP_LON_MIN, MSLP_LON_MAX = -180.0, -80.0   # to -80: H/L domain (-95) + Papagayo cross-isthmus ΔP (83.5W)
 MSLP_RES = 0.5
 MSLP_STEP_EVERY = 6                      # 6-hourly (pressure evolves slowly)
 
