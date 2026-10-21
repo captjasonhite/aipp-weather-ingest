@@ -1,5 +1,7 @@
 # aipp-weather-ingest (Option C data plane)
 
+Weather data pipeline for [AI Passage Plan](https://www.aipassageplan.com). Copyright © 2026 Jason Hite, all rights reserved; see [LICENSE](LICENSE).
+
 Free ECMWF/CMEMS/OISST → cropped SQLite → **GitHub Release assets**. The
 Render app reads the published `latest.json` + `ecmwf_<cycle>.db`; it never
 runs this. No Cloudflare/R2, no credit card, no object-store account.
