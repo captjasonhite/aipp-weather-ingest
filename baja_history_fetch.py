@@ -129,6 +129,45 @@ def _download_existing(repo, year):
         raise
 
 
+_PENDING_ASSET = "era5_pending.json"
+
+
+def _use_release_registry(repo, token):
+    """Keep era5_archive's queued-request registry on the release, so a run
+    can collect what an earlier (fresh) runner submitted."""
+    def load():
+        url = (f"https://github.com/{repo}/releases/download/"
+               f"{RELEASE_TAG}/{_PENDING_ASSET}")
+        try:
+            with urllib.request.urlopen(url, timeout=30) as r:
+                return json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return {}
+            raise
+
+    def save(reg):
+        _put_asset(repo, token, _ensure_release(repo, token), _PENDING_ASSET,
+                   json.dumps(reg, indent=1).encode())
+
+    era5_archive.registry_load = load
+    era5_archive.registry_save = save
+
+
+_WIND_VARS = ["10m_u_component_of_wind", "10m_v_component_of_wind",
+              "10m_wind_gust_since_previous_post_processing"]
+_WAVE_VARS = ["significant_height_of_combined_wind_waves_and_swell",
+              "mean_wave_period", "mean_wave_direction"]
+
+
+def _box():
+    """One CDS box around every station ([N, W, S, E]): 2 requests a month
+    (wind, waves) instead of 2 per station. Same cost per request."""
+    lats = [s["lat"] for s in STATIONS]
+    lons = [s["lon"] for s in STATIONS]
+    return [max(lats) + 0.5, min(lons) - 0.5, min(lats) - 0.5, max(lons) + 0.5]
+
+
 # ── ERA5 → OM-shaped hourly dict (LA tz, kn) ──────────────────────────────────
 
 def _utc_to_la(t_iso: str) -> str:
@@ -153,10 +192,8 @@ def _era5_wind_range(lat, lon, start_date, end_date):
     times, spd, dirs, gst = [], [], [], []
     for year in range(s.year, e.year + 1):
         data = era5_archive.fetch_era5_hourly_point(
-            lat, lon, year,
-            ["10m_u_component_of_wind", "10m_v_component_of_wind",
-             "10m_wind_gust_since_previous_post_processing"],
-            months=_months_in_year(s, e, year))
+            lat, lon, year, _WIND_VARS,
+            months=_months_in_year(s, e, year), area=_box())
         if not data.get("time"):
             continue
         us = data.get("u10", [])
@@ -189,10 +226,8 @@ def _era5_marine_range(lat, lon, start_date, end_date):
     times, h, p, d = [], [], [], []
     for year in range(s.year, e.year + 1):
         data = era5_archive.fetch_era5_hourly_point(
-            lat, lon, year,
-            ["significant_height_of_combined_wind_waves_and_swell",
-             "mean_wave_period", "mean_wave_direction"],
-            months=_months_in_year(s, e, year))
+            lat, lon, year, _WAVE_VARS,
+            months=_months_in_year(s, e, year), area=_box())
         if not data.get("time"):
             continue
         hs = data.get("swh", [])
@@ -309,13 +344,24 @@ def _end_date_for(year):
 
 def _process_range(year, start, end):
     """Fetch + process [start, end] for one year. Returns combined dict."""
+    if era5_archive._nonblocking():
+        # Queued requests only hold ERA5 up to when they were submitted, so a
+        # run that collects them must not ask for later days.
+        reg = era5_archive._reg()
+        pinned = reg.get("_end")
+        if pinned and pinned < end:
+            print(f"[era5] collecting queued requests — range end pinned to "
+                  f"{pinned} (was {end})", flush=True)
+            end = pinned
+        else:
+            reg["_end"] = end
     sd = datetime.date.fromisoformat(start)
     ed = datetime.date.fromisoformat(end)
     months = _months_in_year(sd, ed, year)
-    n_jobs = len(STATIONS) * 2 * len(months)              # 2 datasets per station
+    n_jobs = 2 * len(months)                              # wind + waves box
     print(f"\n── Baja Bash {year}  {start} → {end} "
-          f"({len(months)} months × {len(STATIONS)} stations × 2 datasets "
-          f"= {n_jobs} CDS jobs) ──", flush=True)
+          f"({len(months)} months × 2 datasets, all {len(STATIONS)} stations "
+          f"in one box = {n_jobs} CDS jobs) ──", flush=True)
     by_station = {}
     for s in STATIONS:
         print(f"  {s['name']} …", flush=True)
@@ -399,15 +445,31 @@ def main():
           f"{'full' if full else 'incremental'}, repo={repo or '(local)'}",
           flush=True)
 
+    if repo and token:
+        _use_release_registry(repo, token)
+
     if full:
         data, status = run_full(year, repo, token)
     else:
         data, status = run_incremental(year, repo, token)
 
+    if era5_archive.FAILED:
+        # Same reason: a missing month would be skipped forever.
+        print(f"[result] FAILED — {len(era5_archive.FAILED)} CDS request(s) "
+              f"failed or were rejected; nothing published", flush=True)
+        sys.exit(1)
+    if era5_archive.PENDING:
+        # Publishing now would lock in holes (incremental resumes after the
+        # last date present), so wait until every request is collected.
+        print(f"[result] pending — {len(era5_archive.PENDING)} CDS request(s) "
+              f"still queued; nothing published, next run collects them",
+              flush=True)
+        return
     print(f"[result] {status}", flush=True)
     if status == "skipped":
         return
     publish(year, data, repo, token)
+    era5_archive.clear_registry()
 
 
 if __name__ == "__main__":

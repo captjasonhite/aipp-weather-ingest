@@ -41,6 +41,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # GITHUB_REPOSITORY is set automatically by the runner.
+          # Wait at most 2 h for CDS; still-queued requests are collected next run.
+          ERA5_QUEUE_WAIT_S: "7200"
         run: |
           if [ -n "${{ inputs.year }}" ]; then
             python baja_history_fetch.py --year "${{ inputs.year }}"
