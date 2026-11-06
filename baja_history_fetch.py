@@ -34,13 +34,13 @@ from baja_logic import (
     get_sea_label,
     _BAJA_STATIONS,
     _traffic_light,
+    cape_boost,
 )
 import era5_archive
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 BOAT_SPEED  = 6.0
-CAPE_FACTOR = 1.33
 _MS_TO_KT   = 1.9438444924406046
 
 OUT_DIR = os.environ.get(
@@ -221,8 +221,7 @@ def _hour_color(wind_spd, wind_gust, wind_dir, wave_h, wave_p, wave_dir,
                 nb, cape):
     if any(v is None for v in [wind_spd, wind_gust, wind_dir]):
         return None
-    w = wind_spd * CAPE_FACTOR if cape else wind_spd
-    g = wind_gust * CAPE_FACTOR if cape else wind_gust
+    w, g, cape_on = cape_boost(wind_spd, wind_gust) if cape else (wind_spd, wind_gust, False)
     aws,      awa, _   = get_apparent_data(w, wind_dir, BOAT_SPEED, nb)
     aws_gust, _,   _   = get_apparent_data(g, wind_dir, BOAT_SPEED, nb)
     if any(v is None for v in [wave_h, wave_p, wave_dir]):
@@ -230,8 +229,8 @@ def _hour_color(wind_spd, wind_gust, wind_dir, wave_h, wave_p, wave_dir,
     else:
         app_p = get_apparent_period(wave_p, wave_dir, BOAT_SPEED, nb)
         label, flags = get_sea_label(wave_h, wave_p, app_p, wave_dir, nb,
-                                     w, awa, g)
-    if cape and "⚠️ CAPE EFFECT" not in flags:
+                                     w, awa, g, wind_dir=wind_dir)
+    if cape_on and "⚠️ CAPE EFFECT" not in flags:
         flags = list(flags) + ["⚠️ CAPE EFFECT"]
     worst = {"app_w": aws, "app_w_gust": aws_gust, "awa": awa,
              "label": label, "flags": flags,
