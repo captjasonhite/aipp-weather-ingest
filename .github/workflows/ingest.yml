@@ -26,10 +26,18 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: System eccodes
-        run: sudo apt-get update && sudo apt-get install -y libeccodes-tools
+          cache: pip
+          cache-dependency-path: requirements.txt
+      # eccodes comes bundled in the eccodeslib wheel — no apt, so Ubuntu
+      # mirror outages (2026-11-11 run failed on DNS) can't block the run.
       - name: Python deps
-        run: pip install ecmwf-opendata cfgrib xarray scipy numpy netCDF4 copernicusmarine
+        run: |
+          for i in 1 2 3; do
+            pip install -r requirements.txt && exit 0
+            echo "pip install attempt $i failed; retrying in 60s"
+            sleep 60
+          done
+          exit 1
       - name: Run ingest
         continue-on-error: false
         env:
