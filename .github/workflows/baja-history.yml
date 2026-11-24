@@ -41,8 +41,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # GITHUB_REPOSITORY is set automatically by the runner.
-          # Wait at most 2 h for CDS; still-queued requests are collected next run.
-          ERA5_QUEUE_WAIT_S: "7200"
+          # Wait at most 5 min for CDS. Still-queued requests are collected by
+          # Supabase pg_cron (trigger_baja_collect_if_pending, daily except
+          # Monday 15:00 UTC), which dispatches this workflow only when
+          # era5_pending.json on the release is non-empty.
+          ERA5_QUEUE_WAIT_S: "300"
         run: |
           if [ -n "${{ inputs.year }}" ]; then
             python baja_history_fetch.py --year "${{ inputs.year }}"
