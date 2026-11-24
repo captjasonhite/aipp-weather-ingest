@@ -163,25 +163,40 @@ def _download_nonblocking(dataset, request, target, key) -> None:
         _deadline = time.time() + float(os.environ["ERA5_QUEUE_WAIT_S"])
     # Past the deadline something is still queued: only check requests already
     # submitted, never add another (CDS rejects extras; keep it sequential).
-    remote = _remote_for(_client(), dataset, request, key,
+    client = _client()
+    remote = _remote_for(client, dataset, request, key,
                          submit=time.time() < _deadline)
     if remote is None:
         raise Pending(f"{key}: not submitted, waiting on an earlier request")
     sleep = 5.0
+    resubmitted = False
     while True:
         try:
             if remote.results_ready:                      # raises on failed/rejected
+                remote.download(target)
                 break
         except Exception as e:                            # noqa: BLE001
             if "Maximum number queued" in str(e):         # transient; resubmit next run
                 _deadline = 0.0                           # submit nothing more this run
                 raise Pending(f"{key}: CDS queue full for this account") from e
+            # An expired job still reports "successful"; only download fails.
+            if "results expired" in str(e) and not resubmitted:
+                resubmitted = True
+                print(f"   [era5] {key}: results expired, resubmitting", flush=True)
+                reg = _reg()
+                reg.pop(key, None)
+                registry_save(reg)
+                remote = _remote_for(client, dataset, request, key,
+                                     submit=time.time() < _deadline)
+                if remote is None:
+                    raise Pending(f"{key}: expired, resubmit next run") from e
+                sleep = 5.0
+                continue
             raise
         if time.time() >= _deadline:
             raise Pending(f"{key}: CDS {remote.status} since {_reg()[key]['submitted']}")
         time.sleep(sleep)
         sleep = min(sleep * 1.5, 60.0)
-    remote.download(target)
     # Registry entry stays until clear_registry(): if another request is
     # still pending, the next run re-downloads this one from CDS.
 
