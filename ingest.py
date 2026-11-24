@@ -70,6 +70,13 @@ OUT_DIR = os.environ.get("INGEST_OUT", os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "_out"))
 SKIP_CMEMS = os.environ.get("INGEST_SKIP_CMEMS", "") == "1"
 SKIP_OISST = os.environ.get("INGEST_SKIP_OISST", "") == "1"
+# NOAA OISST day-files: AWS mirror first, then NCEI (often ~1 day sooner).
+OISST_BASES = (
+    ("https://noaa-cdr-sea-surface-temp-optimum-interpolation-pds"
+     ".s3.amazonaws.com/data/v2.1/avhrr"),
+    ("https://www.ncei.noaa.gov/data/"
+     "sea-surface-temperature-optimum-interpolation/v2.1/access/avhrr"),
+)
 
 
 def _timed(label, fn):
@@ -597,15 +604,15 @@ def build_mslp(cx, atmos, run):
 
 
 def fetch_oisst_on_grid(lats, lons):
-    """Latest NOAA OISST daily SST interpolated onto the ECMWF grid."""
+    """Latest NOAA OISST daily SST interpolated onto the ECMWF grid, or None
+    if no file from the last 7 days exists (the run publishes without SST)."""
     import urllib.request
     import xarray as xr
-    base = ("https://noaa-cdr-sea-surface-temp-optimum-interpolation-pds"
-            ".s3.amazonaws.com/data/v2.1/avhrr")
     today = dt.date.today()
     for back in range(1, 8):
         d = today - dt.timedelta(days=back)
-        for suf in ("_preliminary", ""):
+        for base, suf in ((b, s) for b in OISST_BASES
+                          for s in ("_preliminary", "")):
             url = (f"{base}/{d:%Y%m}/oisst-avhrr-v02r01.{d:%Y%m%d}{suf}.nc")
             try:
                 tmp = os.path.join(OUT_DIR, "oisst.nc")
@@ -622,7 +629,9 @@ def fetch_oisst_on_grid(lats, lons):
                     method="nearest").values
             except Exception:                         # noqa: BLE001
                 continue
-    raise RuntimeError("OISST: no recent file found")
+    print("[oisst] WARNING: no file in the last 7 days; publishing without SST",
+          flush=True)
+    return None
 
 
 _GH = "https://api.github.com"
@@ -719,12 +728,11 @@ def _preflight():
         print("[preflight] CMEMS auth OK")
     if not SKIP_OISST:
         import urllib.request
-        base = ("https://noaa-cdr-sea-surface-temp-optimum-interpolation-"
-                "pds.s3.amazonaws.com/data/v2.1/avhrr")
         ok = False
         for back in range(1, 8):
             d = dt.date.today() - dt.timedelta(days=back)
-            for suf in ("_preliminary", ""):
+            for base, suf in ((b, s) for b in OISST_BASES
+                              for s in ("_preliminary", "")):
                 u = (f"{base}/{d:%Y%m}/oisst-avhrr-v02r01."
                      f"{d:%Y%m%d}{suf}.nc")
                 try:
@@ -736,9 +744,10 @@ def _preflight():
                     continue
             if ok:
                 break
-        if not ok:
-            raise RuntimeError("[preflight] no recent OISST file")
-        print("[preflight] OISST reachable")
+        # SST is optional: a NOAA outage must not block the wind forecast.
+        print("[preflight] OISST reachable" if ok else
+              "[preflight] WARNING: no OISST file in 7 days; run continues without SST",
+              flush=True)
 
 
 def main():
